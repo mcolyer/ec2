@@ -9,6 +9,10 @@ async fn main() {
         .version("1.0")
         .author("Your Name")
         .about("Manages EC2 instances")
+        .arg(Arg::with_name("REGION")
+            .help("The AWS region (e.g., us-west-1)")
+            .required(true)
+            .index(1))
         .subcommand(SubCommand::with_name("start")
             .about("Starts an EC2 instance")
             .arg(Arg::with_name("INSTANCE_ID")
@@ -23,24 +27,30 @@ async fn main() {
                 .index(1)))
         .get_matches();
 
-    // Create EC2 client
+    let region = matches.value_of("REGION").unwrap();
+    let region = Region::Custom {
+        name: region.to_owned(),
+        endpoint: format!("ec2.{}.amazonaws.com", region),
+    };
+
+    // Create EC2 client with the specified region
     let client = Ec2Client::new_with(
         HttpClient::new().expect("failed to create request dispatcher"),
         EnvironmentProvider::default(),
-        Region::default(),
+        region,
     );
 
-	match matches.subcommand() {
-		Some(("start", sub_m)) => {
-			let instance_id = sub_m.value_of("INSTANCE_ID").unwrap();
-			start_instance(&client, instance_id).await;
-		},
-		Some(("stop", sub_m)) => {
-			let instance_id = sub_m.value_of("INSTANCE_ID").unwrap();
-			stop_instance(&client, instance_id).await;
-		},
-		_ => eprintln!("Invalid command or no subcommand was provided"),
-	}
+    match matches.subcommand() {
+        Some(("start", sub_m)) => {
+            let instance_id = sub_m.value_of("INSTANCE_ID").unwrap();
+            start_instance(&client, instance_id).await;
+        },
+        Some(("stop", sub_m)) => {
+            let instance_id = sub_m.value_of("INSTANCE_ID").unwrap();
+            stop_instance(&client, instance_id).await;
+        },
+        _ => eprintln!("Invalid command or no subcommand was provided"),
+    }
 }
 
 async fn start_instance(client: &Ec2Client, instance_id: &str) {
