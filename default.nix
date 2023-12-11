@@ -2,7 +2,11 @@
 
 pkgs.mkShell {
   buildInputs = [
-    pkgs.rustup
-    pkgs.glibc_multi
+    pkgs.go
   ];
+  shellHook='''
+    export CGO_ENABLED=0
+    export GOOS=linux
+    export GOARCH=386
+  ''';
 }

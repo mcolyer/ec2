@@ -1,3 +1,0 @@
-#!/bin/sh
-
-cargo build -r --target=i686-unknown-linux-musl
