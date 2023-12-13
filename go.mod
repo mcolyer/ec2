@@ -1,8 +1,8 @@
 module colyer.name/ec2
 
-go 1.21.4
+go 1.23
 
 require (
-	github.com/aws/aws-sdk-go v1.48.16 // indirect
-	github.com/jmespath/go-jmespath v0.4.0 // indirect
+  github.com/aws/aws-sdk-go v1.48.16 // indirect
+  github.com/jmespath/go-jmespath v0.4.0 // indirect
 )
