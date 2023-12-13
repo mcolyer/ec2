@@ -60,6 +60,12 @@
         {
           default = pkgs.mkShell {
             buildInputs = with pkgs; [ go gopls gotools go-tools ];
+
+            shellHook = ''
+              export CGO_ENABLED=0
+              export GOOS=linux
+              export GOARCH=386
+            '';
           };
         });
 
@@ -68,10 +74,10 @@
       # package.
       defaultPackage = forAllSystems (system: self.packages.${system}.go-hello);
 
-			shellHook = ''
-        export CGO_ENABLED=0
-        export GOOS=linux
-        export GOARCH=386
-      '';
+			env = {
+        CGO_ENABLED = 0;
+        GOOS = "linux";
+        GOARCH = 386;
+      };
     };
 }
