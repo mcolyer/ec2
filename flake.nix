@@ -77,7 +77,7 @@
 			env = {
         CGO_ENABLED = 0;
         GOOS = "linux";
-        GOARCH = 386;
+        #GOARCH = 386;
       };
     };
 }

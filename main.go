@@ -1,98 +1,251 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
+	"io/ioutil"
+	"net/http"
 	"os"
-
+	"path"
+	"sort"
+	"strings"
 	"time"
-
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
 )
 
 func main() {
-	if len(os.Args) != 4 {
-		fmt.Println("Usage: <program> <region> <start|stop> <instance-id>")
+	// Get instance ID from command line argument
+	if len(os.Args) < 2 {
+		fmt.Println("Please provide an instance ID as a command line argument.")
+		os.Exit(1)
+	}
+	instanceID := os.Args[1]
+
+	// Get API keys from environment variables
+	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	if accessKey == "" || secretKey == "" {
+		fmt.Println("Please set the AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.")
 		os.Exit(1)
 	}
 
-	region := os.Args[1]
-	action := os.Args[2]
-	instanceId := os.Args[3]
+	// Build request URL
+	url := fmt.Sprintf("https://ec2.us-west-1.amazonaws.com/?Version=2016-11-15&Action=StartInstances&InstanceId.1=%s", instanceID)
 
-	sess := session.Must(session.NewSession(&aws.Config{
-		Region: aws.String(region),
-	}))
-	svc := ec2.New(sess)
-
-	switch action {
-	case "start":
-		startInstance(svc, instanceId)
-	case "stop":
-		stopInstance(svc, instanceId)
-	default:
-		fmt.Println("Invalid action. Use 'start' or 'stop'.")
-	}
-}
-func startInstance(svc ec2iface.EC2API, instanceId string) {
-	input := &ec2.StartInstancesInput{
-		InstanceIds: []*string{
-			aws.String(instanceId),
-		},
-	}
-
-	_, err := svc.StartInstances(input)
+	// Create request with signature
+	req, err := http.NewRequest("POST", url, nil)
 	if err != nil {
-		fmt.Println("Error starting instance:", err)
-		return
+		fmt.Println(err)
+		os.Exit(1)
 	}
 
-	fmt.Println("Instance is starting, waiting for IP address...")
-	ip, err := waitForIp(svc, instanceId)
+	// Set headers with signature and credentials
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	signedRequest := awsRequestSigner.SignRequest(req)
+	SignRequest(req)
+	//auth := generateSignatureV4(accessKey, secretKey, "ec2", req.URL.String(), req.Method)
+	//req.Header.Set("Authorization", auth)
+
+	// Send request and handle response
+	client := http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Println("Error getting IP address:", err)
-		return
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	// Read response body and check for errors
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
 	}
 
-	fmt.Printf("Instance started. IP Address: %s\n", ip)
+	// Decode response and check for success
+	fmt.Printf("%s", body)
+	fmt.Printf("%s", auth)
+
+	fmt.Println("Instance", instanceID, "started successfully.")
 }
 
-func waitForIp(svc ec2iface.EC2API, instanceId string) (string, error) {
-	for {
-		descInput := &ec2.DescribeInstancesInput{
-			InstanceIds: []*string{aws.String(instanceId)},
+// RequestSigner is a utility class to sign http requests using a AWS V4 signature.
+type awsRequestSigner struct {
+	RegionName             string
+	AwsSecurityCredentials map[string]string
+}
+
+const (
+	// AWS Signature Version 4 signing algorithm identifier.
+	awsAlgorithm = "AWS4-HMAC-SHA256"
+	// The termination string for the AWS credential scope value as defined in
+	// https://docs.aws.amazon.com/general/latest/gr/sigv4-create-string-to-sign.html
+	awsRequestType = "aws4_request"
+	// The AWS authorization header name for the security session token if available.
+	awsSecurityTokenHeader = "x-amz-security-token"
+	// The AWS authorization header name for the auto-generated date.
+	awsDateHeader      = "x-amz-date"
+	awsTimeFormatLong  = "20060102T150405Z"
+	awsTimeFormatShort = "20060102"
+)
+
+func getSha256(input []byte) (string, error) {
+	hash := sha256.New()
+	if _, err := hash.Write(input); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+func getHmacSha256(key, input []byte) ([]byte, error) {
+	hash := hmac.New(sha256.New, key)
+	if _, err := hash.Write(input); err != nil {
+		return nil, err
+	}
+	return hash.Sum(nil), nil
+}
+func cloneRequest(r *http.Request) *http.Request {
+	r2 := new(http.Request)
+	*r2 = *r
+	if r.Header != nil {
+		r2.Header = make(http.Header, len(r.Header))
+		// Find total number of values.
+		headerCount := 0
+		for _, headerValues := range r.Header {
+			headerCount += len(headerValues)
 		}
-		result, err := svc.DescribeInstances(descInput)
+		copiedHeaders := make([]string, headerCount) // shared backing array for headers' values
+		for headerKey, headerValues := range r.Header {
+			headerCount = copy(copiedHeaders, headerValues)
+			r2.Header[headerKey] = copiedHeaders[:headerCount:headerCount]
+			copiedHeaders = copiedHeaders[headerCount:]
+		}
+	}
+	return r2
+}
+func canonicalPath(req *http.Request) string {
+	result := req.URL.EscapedPath()
+	if result == "" {
+		return "/"
+	}
+	return path.Clean(result)
+}
+func canonicalQuery(req *http.Request) string {
+	queryValues := req.URL.Query()
+	for queryKey := range queryValues {
+		sort.Strings(queryValues[queryKey])
+	}
+	return queryValues.Encode()
+}
+func canonicalHeaders(req *http.Request) (string, string) {
+	// Header keys need to be sorted alphabetically.
+	var headers []string
+	lowerCaseHeaders := make(http.Header)
+	for k, v := range req.Header {
+		k := strings.ToLower(k)
+		if _, ok := lowerCaseHeaders[k]; ok {
+			// include additional values
+			lowerCaseHeaders[k] = append(lowerCaseHeaders[k], v...)
+		} else {
+			headers = append(headers, k)
+			lowerCaseHeaders[k] = v
+		}
+	}
+	sort.Strings(headers)
+	var fullHeaders strings.Builder
+	for _, header := range headers {
+		headerValue := strings.Join(lowerCaseHeaders[header], ",")
+		fullHeaders.WriteString(header)
+		fullHeaders.WriteRune(':')
+		fullHeaders.WriteString(headerValue)
+		fullHeaders.WriteRune('\n')
+	}
+	return strings.Join(headers, ";"), fullHeaders.String()
+}
+func requestDataHash(req *http.Request) (string, error) {
+	var requestData []byte
+	if req.Body != nil {
+		requestBody, err := req.GetBody()
 		if err != nil {
 			return "", err
 		}
-
-		for _, r := range result.Reservations {
-			for _, i := range r.Instances {
-				if *i.InstanceId == instanceId && *i.State.Name == ec2.InstanceStateNameRunning {
-					return *i.PublicIpAddress, nil
-				}
-			}
+		defer requestBody.Close()
+		requestData, err = ioutil.ReadAll(io.LimitReader(requestBody, 1<<20))
+		if err != nil {
+			return "", err
 		}
-
-		time.Sleep(10 * time.Second)
 	}
+	return getSha256(requestData)
+}
+func requestHost(req *http.Request) string {
+	if req.Host != "" {
+		return req.Host
+	}
+	return req.URL.Host
+}
+func canonicalRequest(req *http.Request, canonicalHeaderColumns, canonicalHeaderData string) (string, error) {
+	dataHash, err := requestDataHash(req)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s", req.Method, canonicalPath(req), canonicalQuery(req), canonicalHeaderData, canonicalHeaderColumns, dataHash), nil
 }
 
-func stopInstance(svc *ec2.EC2, instanceId string) {
-	input := &ec2.StopInstancesInput{
-		InstanceIds: []*string{
-			aws.String(instanceId),
-		},
+// SignRequest adds the appropriate headers to an http.Request
+// or returns an error if something prevented this.
+func (rs *awsRequestSigner) SignRequest(req *http.Request) error {
+	signedRequest := cloneRequest(req)
+	timestamp := now()
+	signedRequest.Header.Add("host", requestHost(req))
+	if securityToken, ok := rs.AwsSecurityCredentials["security_token"]; ok {
+		signedRequest.Header.Add(awsSecurityTokenHeader, securityToken)
 	}
-
-	result, err := svc.StopInstances(input)
+	if signedRequest.Header.Get("date") == "" {
+		signedRequest.Header.Add(awsDateHeader, timestamp.Format(awsTimeFormatLong))
+	}
+	authorizationCode, err := rs.generateAuthentication(signedRequest, timestamp)
 	if err != nil {
-		fmt.Println("Error stopping instance:", err)
-		return
+		return err
 	}
-
-	fmt.Println("Instance stopped:", result.StoppingInstances)
+	signedRequest.Header.Set("Authorization", authorizationCode)
+	req.Header = signedRequest.Header
+	return nil
+}
+func (rs *awsRequestSigner) generateAuthentication(req *http.Request, timestamp time.Time) (string, error) {
+	secretAccessKey, ok := rs.AwsSecurityCredentials["secret_access_key"]
+	if !ok {
+		return "", errors.New("oauth2/google: missing secret_access_key header")
+	}
+	accessKeyId, ok := rs.AwsSecurityCredentials["access_key_id"]
+	if !ok {
+		return "", errors.New("oauth2/google: missing access_key_id header")
+	}
+	canonicalHeaderColumns, canonicalHeaderData := canonicalHeaders(req)
+	dateStamp := timestamp.Format(awsTimeFormatShort)
+	serviceName := ""
+	if splitHost := strings.Split(requestHost(req), "."); len(splitHost) > 0 {
+		serviceName = splitHost[0]
+	}
+	credentialScope := fmt.Sprintf("%s/%s/%s/%s", dateStamp, rs.RegionName, serviceName, awsRequestType)
+	requestString, err := canonicalRequest(req, canonicalHeaderColumns, canonicalHeaderData)
+	if err != nil {
+		return "", err
+	}
+	requestHash, err := getSha256([]byte(requestString))
+	if err != nil {
+		return "", err
+	}
+	stringToSign := fmt.Sprintf("%s\n%s\n%s\n%s", awsAlgorithm, timestamp.Format(awsTimeFormatLong), credentialScope, requestHash)
+	signingKey := []byte("AWS4" + secretAccessKey)
+	for _, signingInput := range []string{
+		dateStamp, rs.RegionName, serviceName, awsRequestType, stringToSign,
+	} {
+		signingKey, err = getHmacSha256(signingKey, []byte(signingInput))
+		if err != nil {
+			return "", err
+		}
+	}
+	return fmt.Sprintf("%s Credential=%s/%s, SignedHeaders=%s, Signature=%s", awsAlgorithm, accessKeyId, credentialScope, canonicalHeaderColumns, hex.EncodeToString(signingKey)), nil
 }
