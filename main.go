@@ -86,6 +86,7 @@ func stopInstance(svc *ec2.EC2, instanceId string) {
 		InstanceIds: []*string{
 			aws.String(instanceId),
 		},
+    Hibernate: aws.Bool(true),
 	}
 
 	result, err := svc.StopInstances(input)
